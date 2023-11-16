@@ -1,25 +1,23 @@
 import argparse
 from datetime import time
 import os
-import re
+import subprocess
 import sys
-import threading
 
 import ffmpeg
 from openai import OpenAI
 from pysubparser import parser
+from pysubparser.classes import subtitle
 from pysubparser.cleaners import formatting
+from pysubparser.writers import srt
 
-MAX_TRIES = 3
 TIMEOUT_RATIO = 2.0  # give the translation call twice as long as the audio length
 MAX_TIMEOUT = 30.0 # but don't let it go over 30 seconds
-
 
 def main():
     parser = argparse.ArgumentParser(description="Transcribe and translate meeting recordings. Requires ffmpeg to be installed. Requires a whisperapi.com key in $WHISPERAPI_KEY.")
     
     parser.add_argument("input_file", help="Input file to transcribe", type=str)
-    parser.add_argument("output_file", help="Location of output transcript", type=str)
     parser.add_argument("-c", "--context", help="Freetext context to help the transcription, useful for teaching phrases/acronyms", type=str, default="")
 
     args = parser.parse_args()
@@ -51,49 +49,48 @@ def main():
 
     print('\nTranslating audio', file=sys.stderr)
     oai_client = OpenAI()
-    with open(args.output_file, 'w') as f:
-        for sub in proc_subs:
-            text = get_translation(oai_client, sub, args.input_file, args.context)
-            f.write(f'({sub['speaker']})\t{format_time(sub['start'])}\n{text}\n')
-            f.flush() # flush to file so we get something if the call crashes/hangs
+    translated_subs = []
+    for sub in proc_subs:
+        translated_subs.append(get_translation(oai_client, sub, args.input_file, args.context))        
+
     print('\tDone!', file=sys.stderr)
-        
+
+    out_subs = f'{args.input_file}.srt'
+    print('\nWriting translated subtitle file to {out_subs}', file=sys.stderr)
+    srt.write(subtitles=translated_subs, path=out_subs)
+    print('\tDone!', file=sys.stderr)
+
+    print('\nAdding translated subtitles to video', file=sys.stderr)
+    add_translations(args.input_file, out_subs)
+    print('\tDone!', file=sys.stderr)
 
 def process_subtitles(srt_file: str) -> list:
     print('\nProcessing subtitles', file=sys.stderr)
     subs = formatting.clean(parser.parse(srt_file))
     cur_sub = None
     final_subs = []
-    speaker_pattern = re.compile(r'^\((.+)\) ')
 
     for sub in subs:
-        m = re.match(speaker_pattern, sub.text)
-        speaker = m.group(1)
-        mysub = {
-            'text': re.sub(speaker_pattern, '', sub.text),
-            'start': sub.start,
-            'end': sub.end,
-            'speaker': speaker 
-        }
-        if cur_sub is None or cur_sub['speaker'] != speaker:
-            cur_sub = mysub
+        if cur_sub is None or cur_sub.lines[0] != sub.lines[0]:
+            cur_sub = sub
             final_subs.append(cur_sub)
+            cur_sub.index = len(final_subs)
         else:
-            cur_sub['end'] = mysub['end']        
-            cur_sub['text'] += ' ' + mysub['text']
-
+            cur_sub.end = sub.end
+            cur_sub.lines += sub.lines[1:]
     print('\tDone!', file=sys.stderr)
     return final_subs
 
-def get_translation(oai_client, sub, in_file, context) -> str:
+def get_translation(oai_client, sub, in_file, addl_context):
     base = os.path.basename(in_file)
     out_file = f'/tmp/{base}.mp3'
-    print(f'\tExtracting audio\t{sub['start']} -> {sub['end']}', file=sys.stderr)
+    print(f'\tExtracting audio\t{sub.start} -> {sub.end}', file=sys.stderr)
+    context = context_for_sub(sub, addl_context)
     try:
         (st, st_err) = (
             ffmpeg
             .input(in_file)
-            .output(out_file, acodec='libmp3lame', ac=1, ar='44100', audio_bitrate='128k', ss=datetime_to_seconds(sub['start']), to=datetime_to_seconds(sub['end']))
+            .output(out_file, acodec='libmp3lame', ac=1, ar='44100', audio_bitrate='128k', ss=datetime_to_seconds(sub.start), to=datetime_to_seconds(sub.end))
             .overwrite_output()
             .run(capture_stdout=True, capture_stderr=True)
         )
@@ -102,7 +99,7 @@ def get_translation(oai_client, sub, in_file, context) -> str:
         exit(1)
 
     timeout = timeout_for_sub(sub)
-    print(f'\tTranslating audio\t{sub['start']} -> {sub['end']}\t(Timeout {timeout} sec)', file=sys.stderr)
+    print(f'\tTranslating audio\t{sub.start} -> {sub.end}\t(Timeout {timeout} sec)', file=sys.stderr)
     with open(out_file, 'rb') as f:
         tr = oai_client.with_options(timeout=timeout).audio.translations.create(
             model = "whisper-1",
@@ -111,8 +108,22 @@ def get_translation(oai_client, sub, in_file, context) -> str:
             response_format = "text",
         )
 
-    print(f'({sub['speaker']}) {sub['start']} -> {sub['end']}\n{sub['text']}->\n{tr}', file=sys.stderr)
-    return tr
+    return subtitle.Subtitle(
+        index = sub.index,
+        start = sub.start,
+        end = sub.end,
+        lines = [speaker(sub), tr],
+    )
+
+def context_for_sub(sub, addl_context):
+    return f"This is audio from a meeting at a Brazilian neobank. The language is probably Brazilian Portuguese, but may be English. {addl_context} A low-quality transcription of the audio is as follows: ```{text(sub)}```"
+
+def add_translations(video_file, srt_file):
+    out_video = f'{video_file}.translated.mp4'
+
+    # using subprocess here because wrangling the ffmpeg-python API for this is difficult
+    subprocess.check_call(['ffmpeg', '-nostdin', '-y', '-i', video_file, '-i', srt_file, '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'mov_text', '-map', '0', '-map', '1', '-metadata:s:s:1', 'language=eng', out_video],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def datetime_to_seconds(dt: time) -> float:
     return dt.hour * 3600 + dt.minute * 60 + dt.second + dt.microsecond / 1000000
@@ -124,7 +135,13 @@ def format_time(t):
         return f"{t.minute}:{t.second:02d}"
 
 def timeout_for_sub(sub) -> float:
-    return min(MAX_TIMEOUT, (datetime_to_seconds(sub['end']) - datetime_to_seconds(sub['start'])) * TIMEOUT_RATIO)
+    return min(MAX_TIMEOUT, (datetime_to_seconds(sub.end) - datetime_to_seconds(sub.start)) * TIMEOUT_RATIO)
+
+def speaker(sub) -> str:
+    return sub.lines[0]
+
+def text(sub) -> str:
+    return "\n".join(sub.lines[1:])
 
 if __name__ == "__main__":
     main()
