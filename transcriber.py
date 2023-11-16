@@ -56,11 +56,11 @@ def main():
     print('\tDone!', file=sys.stderr)
 
     out_subs = f'{args.input_file}.srt'
-    print('\nWriting translated subtitle file to {out_subs}', file=sys.stderr)
+    print(f'\nWriting translated subtitle file to {out_subs}', file=sys.stderr)
     srt.write(subtitles=translated_subs, path=out_subs)
     print('\tDone!', file=sys.stderr)
 
-    print('\nAdding translated subtitles to video', file=sys.stderr)
+    print(f'\nAdding translated subtitles to video at {args.input_file}.translated.mp4', file=sys.stderr)
     add_translations(args.input_file, out_subs)
     print('\tDone!', file=sys.stderr)
 
@@ -116,7 +116,7 @@ def get_translation(oai_client, sub, in_file, addl_context):
     )
 
 def context_for_sub(sub, addl_context):
-    return f"This is audio from a meeting at a Brazilian neobank. The language is probably Brazilian Portuguese, but may be English. {addl_context} A low-quality transcription of the audio is as follows: ```{text(sub)}```"
+    return f"This is audio from a meeting at a Brazilian neobank. The language is probably Brazilian Portuguese, but may be English. {addl_context}"
 
 def add_translations(video_file, srt_file):
     out_video = f'{video_file}.translated.mp4'
