@@ -15,17 +15,12 @@ TIMEOUT_RATIO = 2.0  # give the translation call twice as long as the audio leng
 MAX_TIMEOUT = 30.0 # but don't let it go over 30 seconds
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe and translate meeting recordings. Requires ffmpeg to be installed. Requires a whisperapi.com key in $WHISPERAPI_KEY.")
+    parser = argparse.ArgumentParser(description="Transcribe and translate meeting recordings. Requires ffmpeg to be installed. Requires an OpenAI key in $OPENAI_API_KEY")
     
     parser.add_argument("input_file", help="Input file to transcribe", type=str)
     parser.add_argument("-c", "--context", help="Freetext context to help the transcription, useful for teaching phrases/acronyms", type=str, default="")
 
     args = parser.parse_args()
-
-    key = os.environ.get("WHISPERAPI_KEY")
-    if key is None:
-        print("Please set a whisperapi.com key in $WHISPERAPI_KEY")
-        exit(1)
 
     if not os.path.isfile(args.input_file):
         print("Input file does not exist")
@@ -85,7 +80,6 @@ def get_translation(oai_client, sub, in_file, addl_context):
     base = os.path.basename(in_file)
     out_file = f'/tmp/{base}.mp3'
     print(f'\tExtracting audio\t{sub.start} -> {sub.end}', file=sys.stderr)
-    context = context_for_sub(sub, addl_context)
     try:
         (st, st_err) = (
             ffmpeg
@@ -104,7 +98,7 @@ def get_translation(oai_client, sub, in_file, addl_context):
         tr = oai_client.with_options(timeout=timeout).audio.translations.create(
             model = "whisper-1",
             file = f,
-            prompt = context,
+            prompt = addl_context,
             response_format = "text",
         )
 
@@ -114,9 +108,6 @@ def get_translation(oai_client, sub, in_file, addl_context):
         end = sub.end,
         lines = [speaker(sub), tr],
     )
-
-def context_for_sub(sub, addl_context):
-    return f"This is audio from a meeting at a Brazilian neobank. The language is probably Brazilian Portuguese, but may be English. {addl_context}"
 
 def add_translations(video_file, srt_file):
     out_video = f'{video_file}.translated.mp4'
