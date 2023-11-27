@@ -42,11 +42,15 @@ def main():
     # process subtitle file
     proc_subs = process_subtitles(srt_file)
 
+    # set context
+    context = args.context or default_context(proc_subs)
+    print(f'\nContext: {context}', file=sys.stderr)
+
     print('\nTranslating audio', file=sys.stderr)
     oai_client = OpenAI()
     translated_subs = []
     for sub in proc_subs:
-        translated_subs.append(get_translation(oai_client, sub, args.input_file, args.context))        
+        translated_subs.append(get_translation(oai_client, sub, args.input_file, context))        
 
     print('\tDone!', file=sys.stderr)
 
@@ -131,8 +135,15 @@ def timeout_for_sub(sub) -> float:
 def speaker(sub) -> str:
     return sub.lines[0]
 
+def clean_speaker(sub) -> str:
+    return speaker(sub).replace('(', '').replace(')', '')
+
 def text(sub) -> str:
     return "\n".join(sub.lines[1:])
+
+def default_context(subs):
+    speakers = set(map(clean_speaker, subs))
+    return f'Speakers include: {', '.join(speakers)}'
 
 if __name__ == "__main__":
     main()
