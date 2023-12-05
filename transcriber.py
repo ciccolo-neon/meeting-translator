@@ -1,5 +1,6 @@
 import argparse
-from datetime import time
+from datetime import datetime, time
+import math
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from pysubparser.writers import srt
 
 TIMEOUT_RATIO = 2.0  # give the translation call twice as long as the audio length
 MAX_TIMEOUT = 30.0 # but don't let it go over 30 seconds
+MAX_CAPTION_LENGTH = 900 # max length of a caption, in characters
 
 def main():
     parser = argparse.ArgumentParser(description="Transcribe and translate meeting recordings. Requires ffmpeg to be installed. Requires an OpenAI key in $OPENAI_API_KEY")
@@ -50,7 +52,7 @@ def main():
     oai_client = OpenAI()
     translated_subs = []
     for sub in proc_subs:
-        translated_subs.append(get_translation(oai_client, sub, args.input_file, context))        
+        translated_subs.extend(get_translation(oai_client, sub, len(translated_subs), args.input_file, context))        
 
     print('\tDone!', file=sys.stderr)
 
@@ -80,7 +82,7 @@ def process_subtitles(srt_file: str) -> list:
     print('\tDone!', file=sys.stderr)
     return final_subs
 
-def get_translation(oai_client, sub, in_file, addl_context):
+def get_translation(oai_client, sub, num_so_far, in_file, addl_context):
     base = os.path.basename(in_file)
     out_file = f'/tmp/{base}.mp3'
     print(f'\tExtracting audio\t{sub.start} -> {sub.end}', file=sys.stderr)
@@ -106,12 +108,22 @@ def get_translation(oai_client, sub, in_file, addl_context):
             response_format = "text",
         )
 
-    return subtitle.Subtitle(
-        index = sub.index,
-        start = sub.start,
-        end = sub.end,
-        lines = [speaker(sub), tr],
-    )
+    num_chunks = math.ceil(len(tr) / MAX_CAPTION_LENGTH)
+    chunk_size = math.ceil(len(tr) / num_chunks)
+    subtitles = []
+    tr_words = tr.split()
+    timedelta = get_timedelta(sub.start, sub.end) / num_chunks
+    for i in range(num_chunks):
+        subtext = tr_words.pop(0)
+        while tr_words and len(subtext) + 1 + len(tr_words[0]) < chunk_size + 1:
+            subtext += " " + tr_words.pop(0)
+        subtitles.append(subtitle.Subtitle(
+            index = num_so_far + 1 + i,
+            start = add_timedelta(sub.start, i * timedelta),
+            end = add_timedelta(sub.end,  -1 * (num_chunks - i - 1) * timedelta),
+            lines = [speaker(sub), subtext],
+        ))
+    return subtitles
 
 def add_translations(video_file, srt_file):
     out_video = f'{video_file}.translated.mp4'
@@ -144,6 +156,16 @@ def text(sub) -> str:
 def default_context(subs):
     speakers = set(map(clean_speaker, subs))
     return f'Speakers include: {', '.join(speakers)}'
+
+def get_timedelta(t1, t2):
+    dt1 = datetime.combine(datetime.today(), t1)
+    dt2 = datetime.combine(datetime.today(), t2)
+    return dt2 - dt1
+
+def add_timedelta(t, delta):
+    dt = datetime.combine(datetime.today(), t)
+    dt += delta
+    return dt.time()
 
 if __name__ == "__main__":
     main()
